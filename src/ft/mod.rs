@@ -30,6 +30,7 @@ const MISSING_GLYPH_INDEX: u32 = 0;
 /// Delay before font config reload after creating the `Rasterizer`.
 const RELOAD_DELAY: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 struct FallbackFont {
     pattern: Pattern,
     key: FontKey,
@@ -48,10 +49,38 @@ impl FontKey {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FallbackList {
     list: Vec<FallbackFont>,
     coverage: CharSet,
+}
+
+/// A font face registration from in-memory data.
+///
+/// See [`FreeTypeRasterizer::register_memory_font`].
+#[derive(Debug)]
+pub struct MemoryFontRegistration {
+    /// Family name the font is resolved by.
+    pub family: String,
+
+    /// Slant of the registered face.
+    pub slant: Slant,
+
+    /// Weight of the registered face.
+    pub weight: Weight,
+
+    /// The font file's contents; shared with the loaded face.
+    pub data: Rc<Vec<u8>>,
+}
+
+/// A [`MemoryFontRegistration`] assigned its [`FontKey`].
+#[derive(Debug)]
+struct RegisteredMemoryFont {
+    font_key: FontKey,
+    family: String,
+    slant: Slant,
+    weight: Weight,
+    data: Rc<Vec<u8>>,
 }
 
 struct FaceLoadingProperties {
@@ -79,15 +108,18 @@ impl fmt::Debug for FaceLoadingProperties {
         f.debug_struct("Face")
             .field("ft_face", &self.ft_face)
             .field("load_flags", &self.load_flags)
-            .field("render_mode", &match self.render_mode {
-                freetype::RenderMode::Normal => "Normal",
-                freetype::RenderMode::Light => "Light",
-                freetype::RenderMode::Mono => "Mono",
-                freetype::RenderMode::Lcd => "Lcd",
-                freetype::RenderMode::LcdV => "LcdV",
-                freetype::RenderMode::Max => "Max",
-                freetype::RenderMode::Sdf => "Sdf",
-            })
+            .field(
+                "render_mode",
+                &match self.render_mode {
+                    freetype::RenderMode::Normal => "Normal",
+                    freetype::RenderMode::Light => "Light",
+                    freetype::RenderMode::Mono => "Mono",
+                    freetype::RenderMode::Lcd => "Lcd",
+                    freetype::RenderMode::LcdV => "LcdV",
+                    freetype::RenderMode::Max => "Max",
+                    freetype::RenderMode::Sdf => "Sdf",
+                },
+            )
             .field("lcd_filter", &self.lcd_filter)
             .finish()
     }
@@ -97,6 +129,7 @@ impl fmt::Debug for FaceLoadingProperties {
 pub struct FreeTypeRasterizer {
     loader: FreeTypeLoader,
     fallback_lists: HashMap<FontKey, FallbackList>,
+    memory_fonts: Vec<RegisteredMemoryFont>,
 
     /// Rasterizer creation time stamp to delay lazy font config updates
     /// in `Rasterizer::load_font`.
@@ -145,6 +178,7 @@ impl Rasterize for FreeTypeRasterizer {
         Ok(FreeTypeRasterizer {
             loader: FreeTypeLoader::new()?,
             fallback_lists: HashMap::new(),
+            memory_fonts: Vec::new(),
             creation_timestamp: Some(Instant::now()),
         })
     }
@@ -199,6 +233,14 @@ impl Rasterize for FreeTypeRasterizer {
     }
 
     fn load_font(&mut self, desc: &FontDesc, size: Size) -> Result<FontKey, Error> {
+        // In-memory registrations take precedence over the system font stack.
+        if let Some(font_key) = self.memory_font_key(desc) {
+            if !self.loader.faces.contains_key(&font_key) {
+                self.face_from_memory(font_key, size);
+            }
+            return Ok(font_key);
+        }
+
         if self.creation_timestamp.map_or(true, |timestamp| timestamp.elapsed() > RELOAD_DELAY) {
             self.creation_timestamp = None;
             fc::update_config();
@@ -209,8 +251,10 @@ impl Rasterize for FreeTypeRasterizer {
 
     fn get_glyph(&mut self, glyph_key: GlyphKey) -> Result<RasterizedGlyph, Error> {
         let font_key = self.face_for_glyph(glyph_key);
-        let index =
-            self.loader.faces[&font_key].ft_face.get_char_index(glyph_key.character as usize).unwrap_or_default();
+        let index = self.loader.faces[&font_key]
+            .ft_face
+            .get_char_index(glyph_key.character as usize)
+            .unwrap_or_default();
 
         let glyph = self.render_glyph(font_key, glyph_key.size, glyph_key.character, index)?;
         if index == MISSING_GLYPH_INDEX {
@@ -235,7 +279,6 @@ impl Rasterize for FreeTypeRasterizer {
 
         self.render_glyph(font_key, size, ' ', index)
     }
-
 
     fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32) {
         let font_key = self.face_for_glyph(left);
@@ -265,6 +308,12 @@ impl Rasterize for FreeTypeRasterizer {
             .ok_or(Error::UnknownFontKey)
             .map(|face| (face.location.0.as_path(), face.location.1))
     }
+    fn memory_font_data(&self, font_key: FontKey) -> Option<Rc<Vec<u8>>> {
+        self.memory_fonts
+            .iter()
+            .find(|font| font.font_key == font_key)
+            .map(|font| Rc::clone(&font.data))
+    }
 }
 
 impl From<Slant> for fc::Slant {
@@ -292,6 +341,84 @@ struct FullMetrics {
 }
 
 impl FreeTypeRasterizer {
+    /// Register a font face from in-memory data.
+    ///
+    /// The font is resolved by `(family, slant, weight)` in [`Rasterize::load_font`] before
+    /// the system font stack is consulted; misses fall through unchanged. Missing glyphs
+    /// fall back to the system's generic `monospace` font.
+    pub fn register_memory_font(&mut self, font: MemoryFontRegistration) -> FontKey {
+        let font_key = FontKey::next();
+        self.memory_fonts.push(RegisteredMemoryFont {
+            font_key,
+            family: font.family.to_lowercase(),
+            slant: font.slant,
+            weight: font.weight,
+            data: font.data,
+        });
+        font_key
+    }
+
+    /// Get the [`FontKey`] of a memory-registered font matching `desc`, if any.
+    fn memory_font_key(&self, desc: &FontDesc) -> Option<FontKey> {
+        let Style::Description { slant, weight } = desc.style else { return None };
+
+        self.memory_fonts
+            .iter()
+            .find(|font| {
+                font.family == desc.name.to_lowercase()
+                    && font.slant == slant
+                    && font.weight == weight
+            })
+            .map(|font| font.font_key)
+    }
+
+    /// Build the face of a memory-registered font, alongside fallbacks resolved
+    /// from the system's generic `monospace` font.
+    fn face_from_memory(&mut self, font_key: FontKey, size: Size) {
+        let data = self
+            .memory_fonts
+            .iter()
+            .find(|font| font.font_key == font_key)
+            .map(|font| Rc::clone(&font.data))
+            .expect("memory font key refers to a registration");
+
+        // The buffer is kept alive by the `Rc` shared with the registration.
+        let ft_face = Rc::new(
+            self.loader.library.new_memory_face(data, 0).expect("memory font is a valid font file"),
+        );
+
+        // Mirror fontconfig's default rendering settings (hintslight, antialiased).
+        let face = FaceLoadingProperties {
+            load_flags: LoadFlag::TARGET_LIGHT,
+            render_mode: freetype::RenderMode::Normal,
+            lcd_filter: freetype::ffi::FT_LCD_FILTER_DEFAULT,
+            non_scalable: None,
+            colored_bitmap: ft_face.has_color() && !ft_face.is_scalable(),
+            embolden: false,
+            matrix: None,
+            pixelsize_fixup_factor: None,
+            ft_face: Rc::clone(&ft_face),
+            rgba: Rgba::Unknown,
+            location: (PathBuf::new(), 0),
+            placeholder_glyph_index: ft_face.get_char_index(' ' as usize).unwrap_or_default(),
+        };
+        self.loader.faces.insert(font_key, face);
+
+        // Attach the system's generic monospace fallbacks, so glyphs missing from the
+        // embedded font (CJK, emoji, symbols) still resolve.
+        let fallback_desc = FontDesc::new(
+            "monospace",
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        match self.get_face(&fallback_desc, size) {
+            Ok(system_key) => {
+                if let Some(fallback_list) = self.fallback_lists.get(&system_key).cloned() {
+                    self.fallback_lists.insert(font_key, fallback_list);
+                }
+            },
+            Err(err) => debug!("Unable to load fallbacks for memory font: {err}"),
+        }
+    }
 
     /// Render the glyph `index` of the face `font_key`.
     ///
@@ -896,5 +1023,68 @@ impl FreeTypeLoader {
             fc::LcdFilter::Light => freetype::ffi::FT_LCD_FILTER_LIGHT,
             fc::LcdFilter::Legacy => freetype::ffi::FT_LCD_FILTER_LEGACY,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use super::{
+        BitmapBuffer, FontDesc, FreeTypeRasterizer, GlyphKey, MemoryFontRegistration, Rasterize,
+        Size, Slant, Style, Weight,
+    };
+
+    /// Register a system font in memory and verify it resolves by family name,
+    /// rasterizes glyphs and exposes its data for shaping.
+    #[test]
+    fn memory_font_registration() {
+        let mut rasterizer = FreeTypeRasterizer::new().unwrap();
+
+        // Locate a system font to load into memory.
+        let monospace = FontDesc::new(
+            "monospace",
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        let system_key = rasterizer.load_font(&monospace, Size::new(11.25)).unwrap();
+        let (path, _) = rasterizer.font_path(system_key).unwrap();
+        let data = std::fs::read(path).unwrap();
+
+        // Register the same font in memory under a distinct family name.
+        let family = String::from("Test Memory Font");
+        let font_key = rasterizer.register_memory_font(MemoryFontRegistration {
+            family: family.clone(),
+            slant: Slant::Normal,
+            weight: Weight::Normal,
+            data: Rc::new(data),
+        });
+
+        let memory_desc = FontDesc::new(
+            &family,
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        let loaded_key = rasterizer.load_font(&memory_desc, Size::new(11.25)).unwrap();
+        assert_eq!(loaded_key, font_key);
+
+        // Glyphs rasterize from the memory face.
+        let glyph = rasterizer
+            .get_glyph(GlyphKey { font_key: loaded_key, character: 'A', size: Size::new(11.25) })
+            .unwrap();
+        assert!(glyph.width > 0);
+        assert!(matches!(glyph.buffer, BitmapBuffer::Rgb(_)));
+
+        // The registered data is exposed for text shaping.
+        assert!(rasterizer.memory_font_data(loaded_key).is_some());
+        assert!(rasterizer.memory_font_data(system_key).is_none());
+
+        // Unknown families fall through to the system font stack instead of
+        // resolving to the registration (fontconfig always returns a best
+        // match, so the load itself succeeds).
+        let fallback = FontDesc::new(
+            "Definitely Not A Registered Font",
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        let fallback_key = rasterizer.load_font(&fallback, Size::new(11.25)).unwrap();
+        assert_ne!(fallback_key, font_key);
     }
 }

@@ -97,12 +97,8 @@ impl Descriptor {
             Vec::new()
         };
 
-        let mut font = Font {
-            ct_font,
-            fallbacks,
-            placeholder_glyph_index: 0,
-            path: self.font_path.clone(),
-        };
+        let mut font =
+            Font { ct_font, fallbacks, placeholder_glyph_index: 0, path: self.font_path.clone() };
         font.placeholder_glyph_index = font.glyph_index(' ');
         font
     }
@@ -189,10 +185,7 @@ impl crate::Rasterize for CoreTextRasterizer {
     }
 
     fn font_path(&self, key: FontKey) -> Result<(&Path, u32), Error> {
-        self.fonts
-            .get(&key)
-            .ok_or(Error::UnknownFontKey)
-            .map(|font| (font.path.as_path(), 0))
+        self.fonts.get(&key).ok_or(Error::UnknownFontKey).map(|font| (font.path.as_path(), 0))
     }
 }
 

@@ -8,6 +8,7 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -273,5 +274,14 @@ pub trait Rasterize {
     /// instance a text shaping library.
     fn font_path(&self, _: FontKey) -> Result<(&Path, u32), Error> {
         Err(Error::PlatformError("font path lookup is unsupported".into()))
+    }
+
+    /// Get the data of a font previously added with an in-memory registration,
+    /// if `font_key` refers to such a font.
+    ///
+    /// This allows other libraries, like text shaping, to load the exact same
+    /// font without going through the filesystem.
+    fn memory_font_data(&self, _: FontKey) -> Option<Rc<Vec<u8>>> {
+        None
     }
 }
