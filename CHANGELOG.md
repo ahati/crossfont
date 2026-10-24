@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **Breaking** `Rasterize::get_glyph_by_index` for rasterizing glyphs by their
+  index within a font, as produced by text shaping (ligatures); index `0`
+  renders the font's placeholder glyph
+- **Breaking** `Rasterize::font_path` returning the file path and face index of
+  a loaded font, for loading it in external libraries (e.g. text shaping)
+
+### Changed
+
+- Both new `Rasterize` methods have default implementations returning
+  `PlatformError`, so external implementations keep compiling; the FreeType,
+  CoreText and DirectWrite backends implement them
+
 ## 0.8.1
 
 ### Changed
