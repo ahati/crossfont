@@ -7,6 +7,7 @@
 #![deny(clippy::all, clippy::if_not_else, clippy::enum_glob_use)]
 
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -249,4 +250,28 @@ pub trait Rasterize {
 
     /// Kerning between two characters.
     fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32);
+
+    /// Rasterize the glyph with the index `glyph_index` within the loaded
+    /// `font_key`, at `size`.
+    ///
+    /// This makes it possible to rasterize glyphs which are the result of text
+    /// shaping, like ligatures, for which only a glyph index is known. An
+    /// index of `0` renders the font's placeholder glyph.
+    fn get_glyph_by_index(
+        &mut self,
+        _: FontKey,
+        _: Size,
+        _: u32,
+    ) -> Result<RasterizedGlyph, Error> {
+        Err(Error::PlatformError("glyph index rasterization is unsupported".into()))
+    }
+
+    /// Get the path of a font by its key, alongside the index of the face
+    /// within the file (relevant for font collections).
+    ///
+    /// This is useful when the font should be loaded by another library, for
+    /// instance a text shaping library.
+    fn font_path(&self, _: FontKey) -> Result<(&Path, u32), Error> {
+        Err(Error::PlatformError("font path lookup is unsupported".into()))
+    }
 }

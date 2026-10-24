@@ -3,6 +3,7 @@
 use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,13 @@ struct FaceLoadingProperties {
     pixelsize_fixup_factor: Option<f64>,
     ft_face: Rc<FtFace>,
     rgba: Rgba,
+    /// Path of the file the face was loaded from, alongside its index within
+    /// the file (relevant for font collections).
+    location: (PathBuf, u32),
+    /// The index of the glyph used for placeholder glyphs (usually a space).
+    ///
+    /// This differs per font, so it's cached on load to avoid repeated lookups.
+    placeholder_glyph_index: u32,
 }
 
 impl fmt::Debug for FaceLoadingProperties {
@@ -201,9 +209,103 @@ impl Rasterize for FreeTypeRasterizer {
 
     fn get_glyph(&mut self, glyph_key: GlyphKey) -> Result<RasterizedGlyph, Error> {
         let font_key = self.face_for_glyph(glyph_key);
+        let index =
+            self.loader.faces[&font_key].ft_face.get_char_index(glyph_key.character as usize).unwrap_or_default();
+
+        let glyph = self.render_glyph(font_key, glyph_key.size, glyph_key.character, index)?;
+        if index == MISSING_GLYPH_INDEX {
+            return Err(Error::MissingGlyph(glyph));
+        }
+
+        Ok(glyph)
+    }
+
+    fn get_glyph_by_index(
+        &mut self,
+        font_key: FontKey,
+        size: Size,
+        glyph_index: u32,
+    ) -> Result<RasterizedGlyph, Error> {
+        // Index `0` is the `.notdef` glyph; render the placeholder instead.
+        let index = if glyph_index == MISSING_GLYPH_INDEX {
+            self.loader.faces[&font_key].placeholder_glyph_index
+        } else {
+            glyph_index
+        };
+
+        self.render_glyph(font_key, size, ' ', index)
+    }
+
+
+    fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32) {
+        let font_key = self.face_for_glyph(left);
+        let mut ft_face = (*self.loader.faces[&font_key].ft_face).clone();
+
+        if !freetype_sys::FT_HAS_KERNING(ft_face.raw_mut()) {
+            return (0., 0.);
+        }
+
+        let left = ft_face.get_char_index(left.character as usize).unwrap_or_default();
+        let right = ft_face.get_char_index(right.character as usize).unwrap_or_default();
+
+        let mut kerning = freetype_sys::FT_Vector::default();
+        let mode = freetype_sys::FT_KERNING_DEFAULT;
+
+        unsafe {
+            freetype_sys::FT_Get_Kerning(ft_face.raw_mut(), left, right, mode, &mut kerning);
+        }
+
+        (from_freetype_26_6(kerning.x), from_freetype_26_6(kerning.y))
+    }
+
+    fn font_path(&self, key: FontKey) -> Result<(&Path, u32), Error> {
+        self.loader
+            .faces
+            .get(&key)
+            .ok_or(Error::UnknownFontKey)
+            .map(|face| (face.location.0.as_path(), face.location.1))
+    }
+}
+
+impl From<Slant> for fc::Slant {
+    fn from(slant: Slant) -> Self {
+        match slant {
+            Slant::Normal => fc::Slant::Roman,
+            Slant::Italic => fc::Slant::Italic,
+            Slant::Oblique => fc::Slant::Oblique,
+        }
+    }
+}
+
+impl From<Weight> for fc::Weight {
+    fn from(weight: Weight) -> Self {
+        match weight {
+            Weight::Normal => fc::Weight::Regular,
+            Weight::Bold => fc::Weight::Bold,
+        }
+    }
+}
+
+struct FullMetrics {
+    size_metrics: freetype::ffi::FT_Size_Metrics,
+    cell_width: f64,
+}
+
+impl FreeTypeRasterizer {
+
+    /// Render the glyph `index` of the face `font_key`.
+    ///
+    /// `character` is stored in the resulting [`RasterizedGlyph`], so callers
+    /// can apply zero-width adjustments; glyphs rasterized by index pass `' '`.
+    fn render_glyph(
+        &mut self,
+        font_key: FontKey,
+        size: Size,
+        character: char,
+        index: u32,
+    ) -> Result<RasterizedGlyph, Error> {
         let face = &self.loader.faces[&font_key];
-        let index = face.ft_face.get_char_index(glyph_key.character as usize).unwrap_or_default();
-        let pixelsize = face.non_scalable.unwrap_or_else(|| glyph_key.size.as_px());
+        let pixelsize = face.non_scalable.unwrap_or_else(|| size.as_px());
 
         if !face.colored_bitmap {
             face.ft_face.set_char_size(to_freetype_26_6(pixelsize), 0, 0, 0)?;
@@ -252,7 +354,7 @@ impl Rasterize for FreeTypeRasterizer {
             Self::normalize_buffer(&glyph.bitmap(), &face.rgba)?;
 
         let mut rasterized_glyph = RasterizedGlyph {
-            character: glyph_key.character,
+            character,
             top: glyph.bitmap_top(),
             left: glyph.bitmap_left(),
             width: pixel_width,
@@ -285,53 +387,6 @@ impl Rasterize for FreeTypeRasterizer {
         Ok(rasterized_glyph)
     }
 
-    fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32) {
-        let font_key = self.face_for_glyph(left);
-        let mut ft_face = (*self.loader.faces[&font_key].ft_face).clone();
-
-        if !freetype_sys::FT_HAS_KERNING(ft_face.raw_mut()) {
-            return (0., 0.);
-        }
-
-        let left = ft_face.get_char_index(left.character as usize).unwrap_or_default();
-        let right = ft_face.get_char_index(right.character as usize).unwrap_or_default();
-
-        let mut kerning = freetype_sys::FT_Vector::default();
-        let mode = freetype_sys::FT_KERNING_DEFAULT;
-
-        unsafe {
-            freetype_sys::FT_Get_Kerning(ft_face.raw_mut(), left, right, mode, &mut kerning);
-        }
-
-        (from_freetype_26_6(kerning.x), from_freetype_26_6(kerning.y))
-    }
-}
-
-impl From<Slant> for fc::Slant {
-    fn from(slant: Slant) -> Self {
-        match slant {
-            Slant::Normal => fc::Slant::Roman,
-            Slant::Italic => fc::Slant::Italic,
-            Slant::Oblique => fc::Slant::Oblique,
-        }
-    }
-}
-
-impl From<Weight> for fc::Weight {
-    fn from(weight: Weight) -> Self {
-        match weight {
-            Weight::Normal => fc::Weight::Regular,
-            Weight::Bold => fc::Weight::Bold,
-        }
-    }
-}
-
-struct FullMetrics {
-    size_metrics: freetype::ffi::FT_Size_Metrics,
-    cell_width: f64,
-}
-
-impl FreeTypeRasterizer {
     /// Load a font face according to `FontDesc`.
     fn get_face(&mut self, desc: &FontDesc, size: Size) -> Result<FontKey, Error> {
         // Adjust for DPR.
@@ -700,8 +755,12 @@ impl FreeTypeLoader {
 
             let ft_face = match self.ft_faces.get(&ft_face_location) {
                 Some(ft_face) => Rc::clone(ft_face),
-                None => self.load_ft_face(ft_face_location)?,
+                None => self.load_ft_face(ft_face_location.clone())?,
             };
+
+            // This will be different for each font, so it can't be a constant. It's cached on
+            // load to avoid looking it up for every placeholder glyph.
+            let placeholder_glyph_index = ft_face.get_char_index(' ' as usize).unwrap_or_default();
 
             let non_scalable = if pattern.scalable().next().unwrap_or(true) {
                 None
@@ -736,6 +795,8 @@ impl FreeTypeLoader {
                 pixelsize_fixup_factor,
                 ft_face,
                 rgba,
+                location: (ft_face_location.path, ft_face_location.index.max(0) as u32),
+                placeholder_glyph_index,
             };
 
             debug!("Loaded Face {:?}", face);

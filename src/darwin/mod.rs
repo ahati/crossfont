@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::iter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use core_foundation::array::{CFArray, CFIndex};
@@ -81,7 +81,15 @@ impl Descriptor {
             // Investigate if we can actually use the .-prefixed
             // fallbacks somehow.
             if let Ok(apple_symbols) = new_from_name("Apple Symbols", size) {
-                fallbacks.push(Font { ct_font: apple_symbols, fallbacks: Vec::new() })
+                let path = apple_symbols.copy_descriptor().font_path().unwrap_or_default();
+                let mut font = Font {
+                    ct_font: apple_symbols,
+                    fallbacks: Vec::new(),
+                    placeholder_glyph_index: 0,
+                    path,
+                };
+                font.placeholder_glyph_index = font.glyph_index(' ');
+                fallbacks.push(font);
             };
 
             fallbacks
@@ -89,7 +97,14 @@ impl Descriptor {
             Vec::new()
         };
 
-        Font { ct_font, fallbacks }
+        let mut font = Font {
+            ct_font,
+            fallbacks,
+            placeholder_glyph_index: 0,
+            path: self.font_path.clone(),
+        };
+        font.placeholder_glyph_index = font.glyph_index(' ');
+        font
     }
 }
 
@@ -151,6 +166,33 @@ impl crate::Rasterize for CoreTextRasterizer {
 
     fn kerning(&mut self, _left: GlyphKey, _right: GlyphKey) -> (f32, f32) {
         (0., 0.)
+    }
+
+    fn get_glyph_by_index(
+        &mut self,
+        font_key: FontKey,
+        _size: Size,
+        glyph_index: u32,
+    ) -> Result<RasterizedGlyph, Error> {
+        let font = self.fonts.get(&font_key).ok_or(Error::UnknownFontKey)?;
+
+        // Index `0` is the `.notdef` glyph; render the placeholder instead.
+        let index = if glyph_index == MISSING_GLYPH_INDEX {
+            font.placeholder_glyph_index
+        } else {
+            glyph_index
+        };
+
+        // Fallbacks are not consulted, since shaped glyphs belong to a
+        // specific font.
+        Ok(font.get_glyph(' ', index))
+    }
+
+    fn font_path(&self, key: FontKey) -> Result<(&Path, u32), Error> {
+        self.fonts
+            .get(&key)
+            .ok_or(Error::UnknownFontKey)
+            .map(|font| (font.path.as_path(), 0))
     }
 }
 
@@ -318,6 +360,10 @@ static FONT_SMOOTHING_ENABLED: Lazy<bool> = Lazy::new(|| {
 struct Font {
     ct_font: CTFont,
     fallbacks: Vec<Font>,
+    /// The index of the placeholder glyph (usually a space).
+    placeholder_glyph_index: u32,
+    /// The path of the font file, used for loading the font in other libraries.
+    path: PathBuf,
 }
 
 unsafe impl Send for Font {}

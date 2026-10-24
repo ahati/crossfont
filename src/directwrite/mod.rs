@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 
 use dwrote::{
     FontCollection, FontFace, FontFallback, FontStretch, FontStyle, FontWeight, GlyphOffset,
@@ -30,6 +31,10 @@ struct Font {
     weight: FontWeight,
     style: FontStyle,
     stretch: FontStretch,
+    /// The index of the placeholder glyph (usually a space).
+    placeholder_glyph_index: u16,
+    /// The path of the font file, used for loading the font in other libraries.
+    path: PathBuf,
 }
 
 pub struct DirectWriteRasterizer {
@@ -253,16 +258,54 @@ impl crate::Rasterize for DirectWriteRasterizer {
     fn kerning(&mut self, _left: GlyphKey, _right: GlyphKey) -> (f32, f32) {
         (0., 0.)
     }
+
+    fn get_glyph_by_index(
+        &mut self,
+        font_key: FontKey,
+        size: Size,
+        glyph_index: u32,
+    ) -> Result<RasterizedGlyph, Error> {
+        let font = self.get_loaded_font(font_key)?;
+
+        // Index `0` is the `.notdef` glyph; render the placeholder instead.
+        let index = if glyph_index == usize::from(MISSING_GLYPH_INDEX) {
+            font.placeholder_glyph_index
+        } else {
+            glyph_index as u16
+        };
+
+        // Fallbacks are not consulted, since shaped glyphs belong to a
+        // specific font.
+        self.rasterize_glyph(&font.face, size, ' ', index)
+    }
+
+    fn font_path(&self, key: FontKey) -> Result<(&Path, u32), Error> {
+        Ok((&self.get_loaded_font(key)?.path, 0))
+    }
 }
 
 impl From<dwrote::Font> for Font {
     fn from(font: dwrote::Font) -> Font {
+        let face = font.create_font_face();
+        let placeholder_glyph_index =
+            face.get_glyph_indices(&[' ' as u32]).first().copied().unwrap_or(MISSING_GLYPH_INDEX);
+
+        // Locate the file backing the font face, to allow loading the font in other libraries.
+        let path = face
+            .get_files()
+            .first()
+            .and_then(|file| file.get_font_file_path().ok())
+            .map(PathBuf::from)
+            .unwrap_or_default();
+
         Font {
-            face: font.create_font_face(),
+            face,
             family_name: font.family_name(),
             weight: font.weight(),
             style: font.style(),
             stretch: font.stretch(),
+            placeholder_glyph_index,
+            path,
         }
     }
 }
