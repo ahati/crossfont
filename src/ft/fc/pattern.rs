@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::ptr::{self, NonNull};
 use std::str;
 
+use fontconfig_sys::FcPatternReference;
 use foreign_types::{foreign_type, ForeignType, ForeignTypeRef};
 use libc::{c_char, c_double, c_int};
 
@@ -58,7 +59,7 @@ pub struct BooleanPropertyIter<'a> {
     index: usize,
 }
 
-impl<'a> BooleanPropertyIter<'a> {
+impl BooleanPropertyIter<'_> {
     fn new<'b>(pattern: &'b PatternRef, object: &'b [u8]) -> BooleanPropertyIter<'b> {
         BooleanPropertyIter { pattern, object, index: 0 }
     }
@@ -90,7 +91,7 @@ pub struct IntPropertyIter<'a> {
     index: usize,
 }
 
-impl<'a> IntPropertyIter<'a> {
+impl IntPropertyIter<'_> {
     fn new<'b>(pattern: &'b PatternRef, object: &'b [u8]) -> IntPropertyIter<'b> {
         IntPropertyIter { pattern, object, index: 0 }
     }
@@ -195,7 +196,7 @@ pub struct DoublePropertyIter<'a> {
     index: usize,
 }
 
-impl<'a> DoublePropertyIter<'a> {
+impl DoublePropertyIter<'_> {
     fn new<'b>(pattern: &'b PatternRef, object: &'b [u8]) -> DoublePropertyIter<'b> {
         DoublePropertyIter { pattern, object, index: 0 }
     }
@@ -410,6 +411,7 @@ impl PatternRef {
         scalable() => b"scalable\0",
         symbol() => b"symbol\0",
         color() => b"color\0",
+        outline() => b"outline\0",
         minspace() => b"minspace\0",
         embolden() => b"embolden\0",
         embeddedbitmap() => b"embeddedbitmap\0",
@@ -547,13 +549,7 @@ impl PatternRef {
     /// retained. That is, the CharSet can be safely dropped immediately
     /// after being added to the pattern.
     pub fn add_charset(&self, charset: &CharSetRef) -> bool {
-        unsafe {
-            FcPatternAddCharSet(
-                self.as_ptr(),
-                b"charset\0".as_ptr() as *mut c_char,
-                charset.as_ptr(),
-            ) == 1
-        }
+        unsafe { FcPatternAddCharSet(self.as_ptr(), c"charset".as_ptr(), charset.as_ptr()) == 1 }
     }
 
     /// Get charset from the pattern.
@@ -561,12 +557,7 @@ impl PatternRef {
         unsafe {
             let mut charset = ptr::null_mut();
 
-            let result = FcPatternGetCharSet(
-                self.as_ptr(),
-                b"charset\0".as_ptr() as *mut c_char,
-                0,
-                &mut charset,
-            );
+            let result = FcPatternGetCharSet(self.as_ptr(), c"charset".as_ptr(), 0, &mut charset);
 
             if result == FcResultMatch {
                 Some(&*(charset as *const CharSetRef))
@@ -580,12 +571,7 @@ impl PatternRef {
     pub fn get_matrix(&self) -> Option<FcMatrix> {
         unsafe {
             let mut matrix = ptr::null_mut();
-            let result = FcPatternGetMatrix(
-                self.as_ptr(),
-                b"matrix\0".as_ptr() as *mut c_char,
-                0,
-                &mut matrix,
-            );
+            let result = FcPatternGetMatrix(self.as_ptr(), c"matrix".as_ptr(), 0, &mut matrix);
 
             if result == FcResultMatch {
                 Some(*matrix)
@@ -616,5 +602,10 @@ impl PatternRef {
         unsafe {
             FcDefaultSubstitute(self.as_ptr());
         }
+    }
+
+    pub fn upgrade(&self) -> Pattern {
+        unsafe { FcPatternReference(self.as_ptr()) }
+        unsafe { Pattern(NonNull::new_unchecked(self.as_ptr())) }
     }
 }

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+Versioning note: the code tracks upstream master, but the version stays on the
+0.8.x line so that downstream consumers requiring `crossfont ^0.8.0` (like
+sctk-adwaita) resolve to this same single copy.
+
 ### Added
 
 - **Breaking** `Rasterize::get_glyph_by_index` for rasterizing glyphs by their
@@ -21,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Both new `Rasterize` methods have default implementations returning
   `PlatformError`, so external implementations keep compiling; the FreeType,
   CoreText and DirectWrite backends implement them
+
+### Fixed
+
+- Ignore colored SVG fonts in fontconfig backend
+
+## 0.9.0
+
+### Changed
+
+- MSRV changed to 1.77.0
+- **Breaking** yeslogic-fontconfig-sys bumped to 6.0.0
 
 ## 0.8.1
 
