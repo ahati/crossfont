@@ -268,7 +268,7 @@ impl crate::Rasterize for DirectWriteRasterizer {
         let font = self.get_loaded_font(font_key)?;
 
         // Index `0` is the `.notdef` glyph; render the placeholder instead.
-        let index = if glyph_index == usize::from(MISSING_GLYPH_INDEX) {
+        let index = if glyph_index == u32::from(MISSING_GLYPH_INDEX) {
             font.placeholder_glyph_index
         } else {
             glyph_index as u16
@@ -294,7 +294,7 @@ impl From<dwrote::Font> for Font {
         let path = face
             .get_files()
             .first()
-            .and_then(|file| file.get_font_file_path().ok())
+            .and_then(dwrote::FontFile::get_font_file_path)
             .map(PathBuf::from)
             .unwrap_or_default();
 
