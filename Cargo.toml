@@ -1,5 +1,11 @@
 [package]
 name = "crossfont"
+# Deliberately on the 0.8.x line although the code tracks upstream master
+# (merged through 0.9.0): `sctk-adwaita` — pulled in via winit's
+# `wayland-csd-adwaita-crossfont` feature — requires `crossfont = "0.8.0"`,
+# and a patched crate must satisfy every requirement in the graph. Bumping to
+# 0.9.0 would break the Linux/Wayland build unless sctk-adwaita were forked
+# too. See the versioning note in CHANGELOG.md.
 version = "0.8.2"
 description = "Cross platform native font loading and rasterization"
 authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
